@@ -1,6 +1,5 @@
 (ns ^:mb/driver-tests metabase.driver.clickhouse-impersonation-test
-  "SET ROLE (connection impersonation feature) tests on with single node or on-premise cluster setups."
-  #_{:clj-kondo/ignore [:unsorted-required-namespaces]}
+  "SET ROLE (connection impersonation feature) tests with single node or on-premise cluster setups."
   (:require
    [clojure.test :refer :all]
    [metabase-enterprise.impersonation.util-test :as impersonation.tu]
@@ -13,7 +12,8 @@
    [metabase.test :as mt]
    [metabase.test.data.clickhouse :as ctd]
    [metabase.util :as u]
-   [toucan2.tools.with-temp :as t2.with-temp]))
+   [toucan2.tools.with-temp :as t2.with-temp])
+  (:import [java.sql SQLException]))
 
 (set! *warn-on-reflection* true)
 
@@ -54,11 +54,11 @@
 (defn- set-role-throws-test!
   [details-map]
   (testing "throws when assigning a non-existent role"
-    (is (thrown? Exception
-                 (sql-jdbc.execute/do-with-connection-with-options
-                  :clickhouse (sql-jdbc.conn/connection-details->spec :clickhouse details-map) nil
-                  (fn [^java.sql.Connection conn]
-                    (driver/set-role! :clickhouse conn "asdf")))))))
+    (is (thrown-with-msg? SQLException #"There is no role `asdf` in user directories."
+                          (sql-jdbc.execute/do-with-connection-with-options
+                           :clickhouse (sql-jdbc.conn/connection-details->spec :clickhouse details-map) nil
+                           (fn [^java.sql.Connection conn]
+                             (driver/set-role! :clickhouse conn "asdf")))))))
 
 (defn- do-with-new-metadata-provider
   [details thunk]
@@ -71,9 +71,9 @@
     (let [user-details                   {:user "metabase_test_user"}
           ;; See docker-compose.yml for the port mappings
           ;; 24.4+
-          single-node-port-details       {:port 8123}
+          single-node-port-details       {:port (mt/db-test-env-var :clickhouse :port)}
           single-node-details            (merge user-details single-node-port-details)
-          cluster-port-details           {:port 8127}
+          cluster-port-details           {:port (mt/db-test-env-var :clickhouse :nginx-port)}
           cluster-details                (merge user-details cluster-port-details)]
       (testing "single node"
         (testing "should support the impersonation feature"
@@ -95,7 +95,7 @@
       (testing "on-premise cluster"
         (testing "should support the impersonation feature"
           (t2.with-temp/with-temp
-            [:model/Database db {:engine :clickhouse :details {:user "default" :port 8127}}]
+            [:model/Database db {:engine :clickhouse :details {:user "default" :port (mt/db-test-env-var :clickhouse :nginx-port)}}]
             (is (true? (driver/database-supports? :clickhouse :connection-impersonation db)))))
         (let [statements ["CREATE DATABASE IF NOT EXISTS `metabase_test_role_db` ON CLUSTER '{cluster}';"
                           "CREATE OR REPLACE TABLE `metabase_test_role_db`.`some_table` ON CLUSTER '{cluster}' (i Int32)
@@ -116,7 +116,7 @@
       (testing "older ClickHouse version" ;; 23.3
         (testing "should NOT support the impersonation feature"
           (t2.with-temp/with-temp
-            [:model/Database db {:engine :clickhouse :details {:user "default" :port 8124}}]
+            [:model/Database db {:engine :clickhouse :details {:user "default" :port (mt/db-test-env-var :clickhouse :old-port)}}]
             (is (false? (driver/database-supports? :clickhouse :connection-impersonation db)))))))))
 
 (deftest conn-impersonation-test-clickhouse
@@ -124,11 +124,11 @@
     (mt/with-premium-features #{:advanced-permissions}
       (let [table-name       (str "metabase_impersonation_test.test_" (System/currentTimeMillis))
             select-query     (format "SELECT * FROM %s;" table-name)
-            cluster-port     {:port 8127}
+            cluster-port     {:port (mt/db-test-env-var :clickhouse :nginx-port)}
             cluster-details  {:engine :clickhouse
                               :details {:user   "metabase_impersonation_test_user"
                                         :dbname "metabase_impersonation_test"
-                                        :port   8127}}
+                                        :port   (mt/db-test-env-var :clickhouse :nginx-port)}}
             ddl-statements   ["CREATE DATABASE IF NOT EXISTS metabase_impersonation_test ON CLUSTER '{cluster}';"
                               (format "CREATE TABLE %s ON CLUSTER '{cluster}' (s String)
                                       ENGINE ReplicatedMergeTree('/clickhouse/{cluster}/tables/{database}/{table}/{shard}', '{replica}')

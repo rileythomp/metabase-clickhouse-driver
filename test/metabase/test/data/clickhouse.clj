@@ -5,6 +5,7 @@
    [clojure.string :as str]
    [clojure.test :refer :all]
    [java-time.api :as t]
+   [metabase.config :as config]
    [metabase.db.query :as mdb.query]
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
@@ -13,7 +14,7 @@
    [metabase.driver.sql.util :as sql.u]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.query-processor-test.alternative-date-test :as qp.alternative-date-test]
-   [metabase.query-processor.test-util :as qp.test]
+   [metabase.test :as mt]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.sql :as sql.tx]
    [metabase.test.data.sql-jdbc :as sql-jdbc.tx]
@@ -42,20 +43,20 @@
    [3 "baz" (t/offset-date-time "2012-10-19T10:23:54Z") #t "2012-10-19" (t/offset-date-time "1970-01-01T10:23:54Z")]])
 
 (def default-connection-params
-  {:classname "com.clickhouse.jdbc.ClickHouseDriver"
-   :subprotocol "clickhouse"
-   :subname "//localhost:8123/default"
-   :user "default"
-   :password ""
-   :ssl false
+  {:classname                      "com.clickhouse.jdbc.ClickHouseDriver"
+   :subprotocol                    "clickhouse"
+   :subname                        "//localhost:8123/default"
+   :user                           "default"
+   :password                       ""
+   :ssl                            false
    :use_server_time_zone_for_dates true
-   :product_name "metabase/1.53.2"
+   :product_name                   (format "metabase/%s" (:tag config/mb-version-info))
    :jdbc_ignore_unsupported_values "true"
-   :jdbc_schema_term "schema",
-   :max_open_connections 100
-   :remember_last_set_roles true
-   :http_connection_provider "HTTP_URL_CONNECTION"
-   :custom_http_params ""})
+   :jdbc_schema_term               "schema",
+   :max_open_connections           100
+   :remember_last_set_roles        true
+   :http_connection_provider       "HTTP_URL_CONNECTION"
+   :custom_http_params             ""})
 
 (defmethod sql.tx/field-base-type->sql-type [:clickhouse :type/Boolean]         [_ _] "Boolean")
 (defmethod sql.tx/field-base-type->sql-type [:clickhouse :type/BigInteger]      [_ _] "Int64")
@@ -74,12 +75,11 @@
 
 (defmethod tx/dbdef->connection-details :clickhouse [_ context {:keys [database-name]}]
   (merge
-   {:host     (tx/db-test-env-var-or-throw :clickhouse :host "localhost")
-    :port     (tx/db-test-env-var-or-throw :clickhouse :port 8123)
-    :timezone :America/Los_Angeles}
-   (when-let [user (tx/db-test-env-var :clickhouse :user)]
+   {:host     (mt/db-test-env-var :clickhouse :host)
+    :port     (mt/db-test-env-var :clickhouse :port)}
+   (when-let [user (mt/db-test-env-var :clickhouse :user)]
      {:user user})
-   (when-let [password (tx/db-test-env-var :clickhouse :password)]
+   (when-let [password (mt/db-test-env-var :clickhouse :password)]
      {:password password})
    (when (= context :db)
      {:db database-name})))
@@ -128,6 +128,7 @@
   (sql.u/quote-name :clickhouse :field (ddl.i/format-name :clickhouse name)))
 
 (def ^:private non-nullable-types ["Array" "Map" "Tuple" "Nullable"])
+
 (defn- disallowed-as-nullable?
   [ch-type]
   (boolean (some #(str/starts-with? ch-type %) non-nullable-types)))
@@ -185,9 +186,8 @@
 (defn rows-without-index
   "Remove the Metabase index which is the first column in the result set"
   [query-result]
-  (map #(drop 1 %) (qp.test/rows query-result)))
+  (map #(drop 1 %) (mt/rows query-result)))
 
-#_{:clj-kondo/ignore [:warn-on-reflection]}
 (defn exec-statements
   ([statements details-map]
    (exec-statements statements details-map nil))

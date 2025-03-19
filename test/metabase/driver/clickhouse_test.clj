@@ -1,6 +1,5 @@
 (ns ^:mb/driver-tests metabase.driver.clickhouse-test
   "Tests for specific behavior of the ClickHouse driver."
-  #_{:clj-kondo/ignore [:unsorted-required-namespaces]}
   (:require
    [clojure.test :refer :all]
    [metabase.driver :as driver]
@@ -10,9 +9,7 @@
    [metabase.driver.sql-jdbc.connection :as sql-jdbc.conn]
    [metabase.query-processor.compile :as qp.compile]
    [metabase.test :as mt]
-   [metabase.test.data :as data]
    [metabase.test.data.clickhouse :as ctd]
-   [metabase.test.data.interface :as tx]
    [taoensso.nippy :as nippy]
    [toucan2.tools.with-temp :as t2.with-temp]))
 
@@ -30,7 +27,7 @@
     (t2.with-temp/with-temp
       [:model/Database db
        {:engine  :clickhouse
-        :details (tx/dbdef->connection-details :clickhouse :db {:database-name "default"})}]
+        :details (mt/dbdef->connection-details :clickhouse :db {:database-name "default"})}]
       (let [version (driver/dbms-version :clickhouse db)]
         (is (number? (get-in version [:semantic-version :major])))
         (is (number? (get-in version [:semantic-version :minor])))
@@ -39,7 +36,7 @@
 (deftest ^:parallel clickhouse-server-timezone
   (mt/test-driver :clickhouse
     (is (= "UTC"
-           (let [details (tx/dbdef->connection-details :clickhouse :db {:database-name "default"})
+           (let [details (mt/dbdef->connection-details :clickhouse :db {:database-name "default"})
                  spec    (sql-jdbc.conn/connection-details->spec :clickhouse details)]
              (driver/db-default-timezone :clickhouse spec))))))
 
@@ -73,8 +70,28 @@
     (testing "nil dbname handling"
       (is (= ctd/default-connection-params
              (sql-jdbc.conn/connection-details->spec
-              :clickhouse
-              {:dbname nil}))))))
+              :clickhouse {:dbname nil}))))
+    (testing "schema removal"
+      (doall
+       (for [host ["localhost" "http://localhost" "https://localhost"]]
+         (testing (str "for host " host)
+           (is (= ctd/default-connection-params
+                  (sql-jdbc.conn/connection-details->spec
+                   :clickhouse {:host host}))))))
+      (doall
+       (for [host ["myhost" "http://myhost" "https://myhost"]]
+         (testing (str "for host " host)
+           (is (= (merge ctd/default-connection-params
+                         {:subname "//myhost:8123/default"})
+                  (sql-jdbc.conn/connection-details->spec
+                   :clickhouse {:host host}))))))
+      (doall
+       (for [host ["sub.example.com" "http://sub.example.com" "https://sub.example.com"]]
+         (testing (str "for host " host " with some additional params")
+           (is (= (merge ctd/default-connection-params
+                         {:subname "//sub.example.com:8443/mydb" :ssl true})
+                  (sql-jdbc.conn/connection-details->spec
+                   :clickhouse {:host host :dbname "mydb" :port 8443 :ssl true})))))))))
 
 (deftest ^:parallel clickhouse-connection-string-select-sequential-consistency
   (mt/with-dynamic-fn-redefs [;; This function's implementation requires the connection details to actually
@@ -147,7 +164,7 @@
 
 (deftest ^:parallel clickhouse-query-formatting
   (mt/test-driver :clickhouse
-    (let [query             (data/mbql-query venues {:fields [$id] :order-by [[:asc $id]] :limit 5})
+    (let [query             (mt/mbql-query venues {:fields [$id] :order-by [[:asc $id]] :limit 5})
           {compiled :query} (qp.compile/compile-with-inline-parameters query)
           pretty            (driver/prettify-native-form :clickhouse compiled)]
       (testing "compiled"
@@ -162,7 +179,7 @@
            database            ["default" "Special@Characters~"]]
        (testing (format "User `%s` can connect to `%s` with `%s`" username database password)
          (let [details (merge {:user username :password password}
-                              (tx/dbdef->connection-details :clickhouse :db {:database-name database}))]
+                              (mt/dbdef->connection-details :clickhouse :db {:database-name database}))]
            (is (true? (driver/can-connect? :clickhouse details)))))))))
 
 (deftest clickhouse-qp-extract-datetime-timezone
@@ -180,7 +197,7 @@
     (t2.with-temp/with-temp
       [:model/Database db
        {:engine  :clickhouse
-        :details (tx/dbdef->connection-details :clickhouse :db {:database-name "default"})}]
+        :details (mt/dbdef->connection-details :clickhouse :db {:database-name "default"})}]
       (let [table (keyword (format "insert_table_%s" (System/currentTimeMillis)))]
         (driver/create-table! :clickhouse (:id db) table {:id "Int64", :name "String"})
         (try
