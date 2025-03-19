@@ -1,11 +1,11 @@
 (ns metabase.test.data.clickhouse
   "Code for creating / destroying a ClickHouse database from a `DatabaseDefinition`."
   (:require
-   [clojure.java.io :as io]
    [clojure.java.jdbc :as jdbc]
    [clojure.string :as str]
    [clojure.test :refer :all]
    [java-time.api :as t]
+   [metabase.config :as config]
    [metabase.db.query :as mdb.query]
    [metabase.driver :as driver]
    [metabase.driver.ddl.interface :as ddl.i]
@@ -14,8 +14,7 @@
    [metabase.driver.sql.util :as sql.u]
    [metabase.lib.schema.common :as lib.schema.common]
    [metabase.query-processor-test.alternative-date-test :as qp.alternative-date-test]
-   [metabase.query-processor.test-util :as qp.test]
-   [metabase.sync.core :as sync]
+   [metabase.test :as mt]
    [metabase.test.data.interface :as tx]
    [metabase.test.data.sql :as sql.tx]
    [metabase.test.data.sql-jdbc :as sql-jdbc.tx]
@@ -23,8 +22,9 @@
    [metabase.test.data.sql-jdbc.load-data :as load-data]
    [metabase.test.data.sql.ddl :as ddl]
    [metabase.util.log :as log]
-   [metabase.util.malli :as mu]
-   [toucan2.tools.with-temp :as t2.with-temp]))
+   [metabase.util.malli :as mu]))
+
+(set! *warn-on-reflection* true)
 
 (sql-jdbc.tx/add-test-extensions! :clickhouse)
 
@@ -43,20 +43,20 @@
    [3 "baz" (t/offset-date-time "2012-10-19T10:23:54Z") #t "2012-10-19" (t/offset-date-time "1970-01-01T10:23:54Z")]])
 
 (def default-connection-params
-  {:classname "com.clickhouse.jdbc.ClickHouseDriver"
-   :subprotocol "clickhouse"
-   :subname "//localhost:8123/default"
-   :user "default"
-   :password ""
-   :ssl false
+  {:classname                      "com.clickhouse.jdbc.ClickHouseDriver"
+   :subprotocol                    "clickhouse"
+   :subname                        "//localhost:8123/default"
+   :user                           "default"
+   :password                       ""
+   :ssl                            false
    :use_server_time_zone_for_dates true
-   :product_name "metabase/1.53.2"
+   :product_name                   (format "metabase/%s" (:tag config/mb-version-info))
    :jdbc_ignore_unsupported_values "true"
-   :jdbc_schema_term "schema",
-   :max_open_connections 100
-   :remember_last_set_roles true
-   :http_connection_provider "HTTP_URL_CONNECTION"
-   :custom_http_params ""})
+   :jdbc_schema_term               "schema",
+   :max_open_connections           100
+   :remember_last_set_roles        true
+   :http_connection_provider       "HTTP_URL_CONNECTION"
+   :custom_http_params             ""})
 
 (defmethod sql.tx/field-base-type->sql-type [:clickhouse :type/Boolean]         [_ _] "Boolean")
 (defmethod sql.tx/field-base-type->sql-type [:clickhouse :type/BigInteger]      [_ _] "Int64")
@@ -75,12 +75,11 @@
 
 (defmethod tx/dbdef->connection-details :clickhouse [_ context {:keys [database-name]}]
   (merge
-   {:host     (tx/db-test-env-var-or-throw :clickhouse :host "localhost")
-    :port     (tx/db-test-env-var-or-throw :clickhouse :port 8123)
-    :timezone :America/Los_Angeles}
-   (when-let [user (tx/db-test-env-var :clickhouse :user)]
+   {:host     (mt/db-test-env-var :clickhouse :host)
+    :port     (mt/db-test-env-var :clickhouse :port)}
+   (when-let [user (mt/db-test-env-var :clickhouse :user)]
      {:user user})
-   (when-let [password (tx/db-test-env-var :clickhouse :password)]
+   (when-let [password (mt/db-test-env-var :clickhouse :password)]
      {:password password})
    (when (= context :db)
      {:db database-name})))
@@ -128,7 +127,8 @@
   [name]
   (sql.u/quote-name :clickhouse :field (ddl.i/format-name :clickhouse name)))
 
-(def ^:private non-nullable-types ["Array" "Map" "Tuple"])
+(def ^:private non-nullable-types ["Array" "Map" "Tuple" "Nullable"])
+
 (defn- disallowed-as-nullable?
   [ch-type]
   (boolean (some #(str/starts-with? ch-type %) non-nullable-types)))
@@ -141,11 +141,12 @@
                    (sql.tx/field-base-type->sql-type :clickhouse base-type))
         col-name (quote-name field-name)
         ch-col   (cond
-                   (or pk? (disallowed-as-nullable? ch-type))
+                   (or pk? (disallowed-as-nullable? ch-type) (map? base-type))
                    (format "%s %s" col-name ch-type)
+
                    (= ch-type "Time")
                    (format "%s Nullable(DateTime64) COMMENT 'time'" col-name)
-                   ; _
+
                    :else (format "%s Nullable(%s)" col-name ch-type))]
     ch-col))
 
@@ -185,30 +186,8 @@
 (defn rows-without-index
   "Remove the Metabase index which is the first column in the result set"
   [query-result]
-  (map #(drop 1 %) (qp.test/rows query-result)))
+  (map #(drop 1 %) (mt/rows query-result)))
 
-(def ^:private test-db-initialized? (atom false))
-(defn create-test-db!
-  "Create a ClickHouse database called `metabase_test` and initialize some test data"
-  [f]
-  (when (not @test-db-initialized?)
-    (let [details (tx/dbdef->connection-details :clickhouse :db {:database-name "metabase_test"})]
-      ;; (println "### Executing create-test-db! with details:" details)
-      (jdbc/with-db-connection
-        [spec (sql-jdbc.conn/connection-details->spec :clickhouse (merge {:engine :clickhouse} details))]
-        (let [raw-statements (slurp (io/resource "metabase/test/data/clickhouse_datasets.sql"))
-              statements (as-> raw-statements s
-                           (str/split s #";")
-                           (map str/trim s)
-                           (filter seq s))]
-          ;; (println "## Executing statements " statements)
-          (jdbc/db-do-commands spec false statements)
-          (reset! test-db-initialized? true)))
-      ;; (println "### Done with executing create-test-db! with details:" details)
-))
-  (f))
-
-#_{:clj-kondo/ignore [:warn-on-reflection]}
 (defn exec-statements
   ([statements details-map]
    (exec-statements statements details-map nil))
@@ -220,23 +199,13 @@
     (fn [^java.sql.Connection conn]
       (doseq [statement statements]
         ;; (println "Executing:" statement)
-          (let [^com.clickhouse.jdbc.ConnectionImpl clickhouse-conn (.unwrap conn com.clickhouse.jdbc.ConnectionImpl)
-                query-settings  (new com.clickhouse.client.api.query.QuerySettings)]
-            (with-open [jdbcStmt (.createStatement conn)]
-              (when clickhouse-settings
-                (doseq [[k v] clickhouse-settings] (.setOption query-settings k v)))
-              (.setDefaultQuerySettings clickhouse-conn query-settings)
-              (.execute jdbcStmt statement))))))))
-
-(defn do-with-test-db
-  "Execute a test function using the test dataset"
-  [f]
-  (t2.with-temp/with-temp
-    [:model/Database database
-     {:engine :clickhouse
-      :details (tx/dbdef->connection-details :clickhouse :db {:database-name "metabase_test"})}]
-    (sync/sync-db-metadata! database)
-    (f database)))
+        (let [^com.clickhouse.jdbc.ConnectionImpl clickhouse-conn (.unwrap conn com.clickhouse.jdbc.ConnectionImpl)
+              query-settings  (new com.clickhouse.client.api.query.QuerySettings)]
+          (with-open [jdbcStmt (.createStatement conn)]
+            (when clickhouse-settings
+              (doseq [[k v] clickhouse-settings] (.setOption query-settings k v)))
+            (.setDefaultQuerySettings clickhouse-conn query-settings)
+            (.execute jdbcStmt statement))))))))
 
 (defmethod tx/dataset-already-loaded? :clickhouse
   [driver dbdef]
